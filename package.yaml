@@ -11,10 +11,49 @@ category:            Web
 extra-source-files:
 - README.md
 
+default-extensions:
+  - LambdaCase
+  - RecordWildCards
+  - NamedFieldPuns
+  - TypeFamilies
+  - ScopedTypeVariables
+
 dependencies:
   - base >= 4.7 && < 5
+  - text
+  - bytestring
+  - time
+  - directory
+  - process
+  - typed-process
+  - microlens
+  - mtl
+  - friendly-time
+  - either
+  - split
+  - safe
+  - unliftio
+  - filepath
+  - temporary
+  - string-conv
+  - unix
+  - brick
+  - vty
+  - fsnotify
+  - shake
 
-executables:
-  shake-ui:
-    source-dirs:      src
-    main:             Main.hs
+library:
+  source-dirs:      src
+  exposed-modules:
+    - Development.Shake.UI
+    - Development.Shake.UI.Types
+  ghc-options:
+    - -Wall
+    - -fno-warn-orphans
+    - -fno-warn-unused-imports
+    - -fno-warn-dodgy-exports
+    - -Werror=missing-fields
+    - -Werror=incomplete-patterns
+    - -O0
+
+
