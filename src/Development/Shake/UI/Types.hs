@@ -17,10 +17,11 @@ import Development.Shake
 import qualified Data.List as DL
 
 -- |
-data UIOpts = UIOpts
+data UIOpts evt = UIOpts
   { optSourceDir :: !FilePath
   , optBuild :: !(ShakeOptions -> IO ())
-  , optEventChan :: !(B.BChan UIEvent)
+  , optEventChan :: !(B.BChan evt)
+  , optEventConstr :: !(UIEvent -> evt)
   }
 
 -- |
