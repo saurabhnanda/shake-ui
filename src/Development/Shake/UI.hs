@@ -1,3 +1,5 @@
+{-# LANGUAGE PartialTypeSignatures #-}
+
 module Development.Shake.UI where
 
 import qualified Brick as B
@@ -23,7 +25,54 @@ import UnliftIO.Async
 import Control.Monad
 import UnliftIO.Exception (SomeException, try)
 import Control.Concurrent (threadDelay)
+import Data.Maybe (fromMaybe, maybe)
 
+mkUIOpts :: Maybe (B.BChan (UIEvent evt))
+         -> (ShakeOptions -> IO ())
+         -> (UIOpts -> UIOpts)
+         -> IO UIOpts
+mkUIOpts mEventChan buildFn overrideFn = do
+  eventChan <- maybe (B.newBChan 100) pure mEventChan
+  pure $ overrideFn $ UIOpts
+    { optSourceDir = "src"
+    , optBuild = buildFn
+    , optEventChan = eventChan
+    }
+
+-- mkBrickApp :: UIOpts
+--            -> (B.App s e n -> B.App s e n)
+--            -> IO _
+-- mkBrickApp UIOpts{..} overrideFn = do
+--   tz <- getCurrentTimeZone
+--   let buildVty = V.mkVty V.defaultConfig
+--       brickApp :: B.App UIState UIEvent UIRef
+--       brickApp = B.App
+--                  { B.appDraw = renderBrickApp
+--                  , B.appChooseCursor = (const $ const Nothing)
+--                  , B.appHandleEvent = handleBrickEvent
+--                  , B.appStartEvent = \s -> do
+--                      B.vScrollToEnd $ B.viewportScroll FileWatcherViewport
+--                      pure s
+--                  , B.appAttrMap = brickAttrMap
+--                  }
+--       uiFileWatcherBuffer = FixedLenthList { fllLength = 10, fllElements = [] }
+--       uiShakeBuffer = FixedLenthList { fllLength = 1000, fllElements = [] }
+--       uiToLocalTime = utcToLocalTime tz
+--       uiShakeProgress = Nothing
+--   uiAbsoluteSourceDir <- makeAbsolute optSourceDir
+--   initialVty <- buildVty
+--   pure (initialVty, buildVty, brickApp)
+  -- withAsync (runFileWatcher uiOpts optEventChan) $ \_ -> do
+  --   void $ B.customMain initialVty buildVty (Just optEventChan) brickApp UIState{..}
+
+mkInitialUIState :: UIOpts -> IO UIState
+mkInitialUIState UIOpts{..} = do
+  let uiFileWatcherBuffer = FixedLenthList { fllLength = 10, fllElements = [] }
+      uiShakeBuffer = FixedLenthList { fllLength = 1000, fllElements = [] }
+      uiToLocalTime = utcToLocalTime tz
+      uiShakeProgress = Nothing
+  uiAbsoluteSourceDir <- makeAbsolute optSourceDir
+  pure UIState{..}
 
 defaultMain :: UIOpts -> IO ()
 defaultMain uiOpts@UIOpts{..} = do
@@ -37,17 +86,12 @@ defaultMain uiOpts@UIOpts{..} = do
                  , B.appStartEvent = \s -> do
                      B.vScrollToEnd $ B.viewportScroll FileWatcherViewport
                      pure s
-                 , B.appAttrMap = (const brickAttrMap)
+                 , B.appAttrMap = brickAttrMap
                  }
-      uiFileWatcherBuffer = FixedLenthList { fllLength = 10, fllElements = [] }
-      uiShakeBuffer = FixedLenthList { fllLength = 1000, fllElements = [] }
-      uiToLocalTime = utcToLocalTime tz
-      uiShakeProgress = Nothing
-  uiAbsoluteSourceDir <- makeAbsolute optSourceDir
+  uiState <- mkInitialUIState uiOpts
   initialVty <- buildVty
-  eventChan <- B.newBChan 100
-  withAsync (runFileWatcher uiOpts eventChan) $ \_ -> do
-    void $ B.customMain initialVty buildVty (Just eventChan) brickApp UIState{..}
+  withAsync (runFileWatcher uiOpts optEventChan) $ \_ -> do
+    void $ B.customMain initialVty buildVty (Just optEventChan) brickApp uiState
 
 
 renderBrickApp :: UIState -> [B.Widget UIRef]
@@ -73,26 +117,25 @@ shakeProgressBar UIState{uiShakeProgress} =
   , B.strWrap $ "Built: " <> maybe "N" (show . countBuilt) uiShakeProgress
   , B.strWrap $ "Unknown: " <> maybe "N" (show . countUnknown) uiShakeProgress
   , B.strWrap $ "Todo: " <> maybe "N" (show . countTodo) uiShakeProgress
+  , B.strWrap $ "isFailure: " <> maybe "N" (show . isFailure) uiShakeProgress
   ]
   where
-    completionPercentage = 0.5
+    completionPercentage = case uiShakeProgress of
+      Nothing -> 0.0
+      Just Progress{..} ->
+        -- NOTE: https://github.com/jtdaugherty/brick/issues/281
+        let p = (fromIntegral $ countSkipped + countBuilt) / (fromIntegral $ countTodo + countUnknown + countSkipped + countBuilt)
+        in if p==1.00
+           then p
+           else 0.95
 
 handleBrickEvent :: (s ~ UIState, n ~ UIRef, e ~ UIEvent)
                  => s
                  -> B.BrickEvent n e
                  -> B.EventM n (B.Next s)
 handleBrickEvent uiState@UIState{..} brickEvent = case brickEvent of
-  B.AppEvent evt -> case evt of
-    EvtFileWatcherStarted t ->
-      B.continue $ uiState{uiFileWatcherBuffer=fllAdd (t, "File watcher starter") uiFileWatcherBuffer}
-    EvtFileChanged fsEvt -> do
-      let fp = makeRelative uiAbsoluteSourceDir $ Notify.eventPath fsEvt
-          t = uiToLocalTime $ Notify.eventTime fsEvt
-      B.continue $ uiState{uiFileWatcherBuffer=fllAdd (t, fp) uiFileWatcherBuffer}
-    EvtShakeOutput verbosity str -> do
-      B.continue $ uiState{uiShakeBuffer=fllAdd str uiShakeBuffer}
-    EvtUpdateShakeProgress progress -> do
-      B.continue $ uiState{uiShakeProgress=Just progress}
+  B.AppEvent evt ->
+    handleUIEvent evt
   B.VtyEvent evt -> case evt of
     V.EvKey k ms -> case (V.MCtrl `elem` ms) of
       True -> case k of
@@ -103,18 +146,39 @@ handleBrickEvent uiState@UIState{..} brickEvent = case brickEvent of
     _ -> B.continue uiState
   _ -> B.continue uiState
 
+handleUIEvent :: (s ~ UIState, n ~ UIRef)
+              => UIEvent evt
+              -> B.EventM n (B.Next s)
+handleUIEvent evt =
+  case evt of
+    EvtFileWatcherStarted t ->
+      B.continue $ uiState{uiFileWatcherBuffer=fllAdd (t, "File watcher starter") uiFileWatcherBuffer}
+    EvtFileChanged fsEvt -> do
+      let fp = makeRelative uiAbsoluteSourceDir $ Notify.eventPath fsEvt
+          t = uiToLocalTime $ Notify.eventTime fsEvt
+      B.continue $ uiState{uiFileWatcherBuffer=fllAdd (t, fp) uiFileWatcherBuffer}
+    EvtShakeOutput verbosity str -> do
+      B.continue $ uiState{uiShakeBuffer=fllAdd (show verbosity <> ": " <> str) uiShakeBuffer}
+    EvtUpdateShakeProgress progress -> do
+      B.continue $ uiState{uiShakeProgress=Just progress}
+    EvtShakeTrace k c b -> do
+      B.continue $ uiState{uiShakeBuffer = fllAdd (k <> " / " <> c <> " / " <> show b) uiShakeBuffer}
+
 yellowText :: B.AttrName
 yellowText = B.attrName "yellowText"
 
 attrFileChangedMarker :: B.AttrName
 attrFileChangedMarker = B.attrName "fileChangedMarker"
 
-brickAttrMap :: B.AttrMap
-brickAttrMap = B.attrMap (B.fg B.white) $
+brickAttrMap :: UIState -> B.AttrMap
+brickAttrMap UIState{uiShakeProgress} = B.attrMap (B.fg B.white) $
   [ (attrFileChangedMarker, B.fg B.brightYellow)
   , (B.progressIncompleteAttr, B.bg B.white)
-  , (B.progressCompleteAttr, B.bg B.green)
+  , (B.progressCompleteAttr, B.bg progressColor)
   ]
+  where
+    -- in the Maybe monad
+    progressColor = fromMaybe B.green $ uiShakeProgress >>= isFailure >>= (const $ pure B.red)
 
 shakeViewport :: UIState -> B.Widget UIRef
 shakeViewport UIState{uiShakeBuffer} =
@@ -157,16 +221,19 @@ runFileWatcher UIOpts{..} eventChan = do
                      , shakeLint = Just LintBasic
                      , shakeChange = ChangeDigest
                      , shakeOutput = brickShakeOutput
-                     -- , shakeCommandOptions = [EchoStdout False, EchoStderr False]
+                     , shakeCommandOptions = [EchoStdout False, EchoStderr False]
                      , shakeProgress = myShakeProgress
+                     -- , shakeReport = ["/tmp/shake-report.json", "/tmp/shake-report.html"]
+                     , shakeTrace = brickShakeTrace
                      }
     -- TODO: colorize the output based on verbosity
     brickShakeOutput verbosity str = B.writeBChan eventChan $ EvtShakeOutput verbosity str
+    brickShakeTrace k c b = B.writeBChan eventChan $ EvtShakeTrace k c b
     buildCmd = optBuild myShakeOptions
     myShakeProgress pollProgress = forever $ do
       progress <- pollProgress
       B.writeBChan eventChan $ EvtUpdateShakeProgress progress
-      threadDelay 1000000
+      threadDelay 10000
 
 buildSupervisor :: IO () -> MVar () -> IO ()
 buildSupervisor buildCmd buildMVar = forever $ do

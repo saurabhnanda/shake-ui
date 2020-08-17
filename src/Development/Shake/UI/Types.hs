@@ -20,6 +20,7 @@ import qualified Data.List as DL
 data UIOpts = UIOpts
   { optSourceDir :: !FilePath
   , optBuild :: !(ShakeOptions -> IO ())
+  , optEventChan :: !(B.BChan UIEvent)
   }
 
 -- |
@@ -36,6 +37,7 @@ data UIEvent = EvtFileWatcherStarted !LocalTime
              | EvtFileChanged !Notify.Event
              | EvtShakeOutput !Verbosity !String
              | EvtUpdateShakeProgress !Progress
+             | EvtShakeTrace !String !String !Bool
              deriving (Eq, Show)
 
 -- |
